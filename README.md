@@ -7,12 +7,13 @@ Predicting Arsenal FC player injury risk using career injury history, workload, 
 Healthball is split into two parts: a **data pipeline** that runs offline, and a **frontend** embedded in the portfolio.
 
 ```
-seed.py                  — wipes and re-seeds squad + injury history
-model/train.py           — computes weighted risk scores, writes to DB
+seed.py                  — wipes and re-seeds squad + injury history (estimated minutes as fallback)
+etl/fetch_minutes.py     — fetches real minutes played from FBref (all competitions), updates DB
+model/train.py           — computes weighted risk scores, appends to DB (time-series)
       │
       ▼
 Neon PostgreSQL (cloud)
-      │  server-side query
+      │  server-side LATERAL query (latest score per player)
       ▼
 portfolio/app/api/healthball/   — Next.js API routes
       │
@@ -22,7 +23,7 @@ portfolio/app/healthball/       — React UI at /healthball
 
 There is no runtime Python server. Risk scores are precomputed and stored in the database. The portfolio's Next.js API routes query Neon directly from the server side, so DB credentials are never exposed to the browser.
 
-> **Note on scraping:** Transfermarkt actively blocks automated requests. The ETL scrapers (`etl/load_players.py`, `etl/load_injuries.py`) are kept for reference but are not part of the current workflow. All squad and injury data is managed manually in `seed.py`.
+> **Note on scraping:** Transfermarkt actively blocks automated requests. The legacy ETL scrapers (`etl/load_players.py`, `etl/load_injuries.py`) are kept for reference only. Squad and injury data is managed manually in `seed.py`. Minutes played are fetched automatically from FBref via `etl/fetch_minutes.py` — if that request fails, `refresh.sh` falls back to the estimates in `seed.py`'s `SEASON_MINUTES` dict.
 
 ## Architecture
 
@@ -41,12 +42,13 @@ healthball/
 │   ├── schema.sql              # DB table definitions
 │   ├── seed.py                 # All squad + injury history — edit this to maintain data
 │   ├── new_season.py           # Season-transition helper (run once each summer)
-│   ├── refresh.sh              # One-command pipeline: seed.py → train.py
+│   ├── refresh.sh              # One-command pipeline: seed.py → fetch_minutes.py → train.py
 │   ├── requirements.txt        # Python dependencies
-│   ├── etl/                    # Legacy scrapers (reference only — TM blocks bots)
-│   │   ├── players_to_scrape.csv
-│   │   ├── load_players.py
-│   │   └── load_injuries.py
+│   ├── etl/
+│   │   ├── fetch_minutes.py    # Fetches real minutes from Understat API, updates players.recent_minutes
+│   │   ├── players_to_scrape.csv  # Legacy — TM blocks bots, reference only
+│   │   ├── load_players.py        # Legacy — reference only
+│   │   └── load_injuries.py       # Legacy — reference only
 │   └── model/
 │       └── train.py            # Computes risk scores, writes to DB
 │
@@ -59,13 +61,17 @@ portfolio/                      # Separate repo: joonbo.com portfolio
 │   │   ├── layout.tsx
 │   │   └── _components/
 │   │       ├── types.ts
-│   │       ├── PlayerCard.tsx      # Grid card with risk bar + injury badge
-│   │       ├── PlayerDrawer.tsx    # Slide-in detail panel with stats + timeline
-│   │       ├── RiskGauge.tsx       # Canvas arc gauge (0–100)
-│   │       └── InjuryTimeline.tsx  # Chronological injury list
+│   │       ├── PlayerCard.tsx          # Grid card with risk bar + injury badge
+│   │       ├── PlayerDrawer.tsx        # Slide-in detail panel: stats, history chart, score breakdown, timeline
+│   │       ├── RiskGauge.tsx           # SVG arc gauge (0–100)
+│   │       ├── ScoreHistoryChart.tsx   # SVG sparkline of risk score over time
+│   │       └── InjuryTimeline.tsx      # Chronological injury list
 │   └── api/healthball/players/
 │       ├── route.ts            # GET /api/healthball/players
-│       └── [id]/route.ts       # GET /api/healthball/players/:id
+│       └── [id]/
+│           ├── route.ts        # GET /api/healthball/players/:id
+│           └── history/
+│               └── route.ts   # GET /api/healthball/players/:id/history
 └── .env.local                  # HEALTHBALL_DATABASE_URL (server-side only)
 ```
 
@@ -73,31 +79,33 @@ portfolio/                      # Separate repo: joonbo.com portfolio
 
 ```sql
 players      — name, position, age, nationality, tm_id,
-               currently_injured, debut_age, career_apps, recent_apps
+               currently_injured, debut_age, career_apps, recent_apps,
+               recent_minutes   ← fetched from FBref; seed.py estimates are fallback
 injuries     — season, injury_type, injury_from, injury_to,
                days_out, games_missed, minutes_before, minutes_total
 risk_scores  — risk_score (0–100), risk_level, features (JSONB), computed_at
 ```
 
-`injury_to = NULL` marks an active (ongoing) injury. The `risk_scores` table is fully replaced each time `train.py` runs.
+`injury_to = NULL` marks an active (ongoing) injury. The `risk_scores` table **accumulates rows** — each `train.py` run appends new scores. The API fetches the latest score per player via a `LATERAL` subquery ordered by `computed_at DESC`.
 
 ## Risk model
 
-Pure weighted formula — more reliable than a trained model with only 22 players. The score (0–100) is the sum of:
+Pure weighted formula with position-adjusted multipliers — more reliable than a trained model with only 22 players. The score (0–100) is the sum of:
 
 | Feature | What it captures | Max pts |
 |---------|-----------------|---------|
 | `currently_injured` | Player is provably unavailable right now | 12 |
 | `age` | Older players break down more often (penalty at 28, 30, 32) | 18 |
-| `debut_age` | Earlier debut = more load accumulated on a developing body | 4.5 |
+| `debut_age` | Debut before 19 = more load on a developing body (18→1.5 pts, 17→3.0 pts, ≤16→4.5 pts) | 4.5 |
 | `career_apps` | Total career appearances across all clubs — physical mileage | 5 |
-| `recent_apps` | Combined apps in 24/25 + 25/26 — overload / fatigue risk | 6 |
+| `recent_minutes` | Minutes played across all comps in 24/25 + 25/26 — fatigue risk | 6 |
 | `total_injuries` | Career injury count | 20 |
-| `ligament_count` | Cruciate / ACL / Achilles injuries | unbounded |
-| `muscle_count` | Hamstring / thigh / adductor / calf injuries | unbounded |
+| `severity_score` | Taxonomy-weighted career injury severity (ACL=15, Achilles=12, hamstring=5 …) | unbounded |
 | `avg_days_out` | Severity proxy — how long injuries sideline the player | 10 |
 | `recent_injuries` | Injuries in the last 2 seasons | 18 |
 | `days_since_last` | Recency weight — recent injury = higher risk | 12 |
+
+`severity_score` and the `recent_minutes` workload component are multiplied by **position-group factors** (e.g. wide players ×1.30/×1.15, goalkeepers ×0.55/×0.65) to reflect position-specific physical demands.
 
 Risk levels: **high** ≥ 60 · **medium** ≥ 20 · **low** < 20
 
@@ -163,7 +171,7 @@ source venv/bin/activate
 bash refresh.sh
 ```
 
-This wipes existing data, seeds the current squad and all injury history, then recomputes risk scores. Takes ~5 seconds.
+This wipes existing data, seeds the squad and injury history, fetches real minutes from FBref (falls back to estimates if unreachable), then recomputes and appends risk scores. Takes ~15 seconds.
 
 ### 5. Run the portfolio locally
 
@@ -190,7 +198,7 @@ All squad and injury data lives in `backend/seed.py`. After any edit, push it to
 ```bash
 cd backend
 source venv/bin/activate
-bash refresh.sh        # runs seed.py then model/train.py (~5 seconds)
+bash refresh.sh        # seed.py → fetch_minutes.py (FBref) → train.py (~15 seconds)
 ```
 
 The portfolio page reflects the update immediately — no redeploy required.
@@ -219,16 +227,11 @@ The portfolio page reflects the update immediately — no redeploy required.
 2. Set `currently_injured=False` on the player in `SQUAD`.
 3. Run `refresh.sh`.
 
-**Appearances accumulate (workload tracking)**
+**Minutes played (workload tracking)**
 
-`SEASON_APPS` in `seed.py` tracks per-player, per-season game counts. `recent_apps` is computed automatically as the sum of the last two seasons — no manual calculation needed. Update the current season's value periodically during the season and finalise it at season end:
+`recent_minutes` (total minutes across all competitions in 24/25 + 25/26) is fetched automatically from FBref every time `refresh.sh` runs — no manual update needed mid-season.
 
-```python
-SEASON_APPS = {
-    SAKA: {"24/25": 37, "25/26": 40},   # update "25/26" as games are played
-    ...
-}
-```
+`SEASON_MINUTES` in `seed.py` holds estimated values used as a fallback if FBref is unreachable. Update these at end of season with actual totals from FBref / Transfermarkt. `SEASON_APPS` (appearance counts) is still maintained manually and used for display purposes.
 
 **Squad changes (loan / transfer / departure)**
 
@@ -256,13 +259,13 @@ python new_season.py 26/27
 **What the script does automatically:**
 - Bumps every player's age by 1
 - Updates `SQUAD_SEASON`, `PREV_SEASON`, and `SQUAD_UPDATED` in `seed.py`
-- Adds `"26/27": 0` to every player's `SEASON_APPS` entry
+- Adds `"26/27": 0` to every player's `SEASON_APPS` and `SEASON_MINUTES` entries
 - Inserts a blank `INJURIES_2627 = []` block in `seed.py`
 - Appends `INJURIES_2627` to `ALL_INJURIES`
-- Updates `CURRENT_SEASON_YEAR` in `model/train.py`
+- Updates `CURRENT_SEASON_YEAR` in `model/train.py` and `etl/fetch_minutes.py`
 
 **What still needs manual attention** (the script prints this checklist):
-1. Verify/correct `SEASON_APPS` final values for the just-ended season
+1. Verify/correct `SEASON_APPS` final values and update `SEASON_MINUTES` with actual end-of-season totals from FBref (fetch_minutes.py will keep these accurate during the season)
 2. Update `career_apps` for all players
 3. Close any ongoing injuries from last season (fill `injury_to`, `days_out`, `games_missed`; set `currently_injured=False`)
 4. Handle transfers — remove departed players, add new signings
@@ -301,6 +304,10 @@ The `/healthball` page and its API routes are part of the portfolio Next.js app,
    ```
 2. Deploy normally (`git push` or Vercel CLI). The API routes are server-side and require no separate server.
 
-## Data source
+## Data sources
 
-Injury history is sourced from [Transfermarkt](https://www.transfermarkt.com) (manually verified) and cross-referenced with Wikipedia for career appearance counts and debut ages.
+| Data | Source | How |
+|---|---|---|
+| Injury history | [Transfermarkt](https://www.transfermarkt.com) | Manually entered in `seed.py` |
+| Career appearances / debut age | Transfermarkt / Wikipedia | Manually entered in `seed.py` |
+| Minutes played per season | [Understat](https://understat.com) (Premier League) | Auto-fetched by `etl/fetch_minutes.py` each `refresh.sh` run; manual FBref CSV fallback via `--csv` |

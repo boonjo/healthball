@@ -23,9 +23,10 @@ import sys
 from datetime import date
 from pathlib import Path
 
-HERE = Path(__file__).parent
-SEED_PATH  = HERE / "seed.py"
-TRAIN_PATH = HERE / "model" / "train.py"
+HERE         = Path(__file__).parent
+SEED_PATH    = HERE / "seed.py"
+TRAIN_PATH   = HERE / "model" / "train.py"
+FETCH_PATH   = HERE / "etl" / "fetch_minutes.py"
 
 
 def parse_season(raw: str) -> tuple[str, int]:
@@ -137,6 +138,7 @@ def main() -> None:
 
     seed  = SEED_PATH.read_text()
     train = TRAIN_PATH.read_text()
+    fetch = FETCH_PATH.read_text()
 
     # Derive the current (outgoing) season from the file
     m = re.search(r'SQUAD_SEASON\s+=\s+"([^"]+)"', seed)
@@ -154,24 +156,28 @@ def main() -> None:
 
     seed  = update_seed(seed, new_s, old_s, new_year)
     train = update_train(train, new_year)
+    fetch = update_train(fetch, new_year)  # same CURRENT_SEASON_YEAR constant
 
     SEED_PATH.write_text(seed)
     TRAIN_PATH.write_text(train)
+    FETCH_PATH.write_text(fetch)
 
-    print(f"  seed.py        SQUAD_SEASON → {new_s!r}")
-    print(f"  seed.py        PREV_SEASON  → {old_s!r}")
-    print(f"  seed.py        SQUAD_UPDATED → {date.today().isoformat()!r}")
-    print(f"  seed.py        All ages bumped +1")
-    print(f"  seed.py        SEASON_APPS  — added \"{new_s}\": 0 for every player")
-    print(f"  seed.py        INJURIES_{new_safe} = [] block inserted")
-    print(f"  seed.py        ALL_INJURIES now includes INJURIES_{new_safe}")
-    print(f"  model/train.py CURRENT_SEASON_YEAR → {new_year}")
+    print(f"  seed.py              SQUAD_SEASON → {new_s!r}")
+    print(f"  seed.py              PREV_SEASON  → {old_s!r}")
+    print(f"  seed.py              SQUAD_UPDATED → {date.today().isoformat()!r}")
+    print(f"  seed.py              All ages bumped +1")
+    print(f"  seed.py              SEASON_APPS + SEASON_MINUTES — added \"{new_s}\": 0 for every player")
+    print(f"  seed.py              INJURIES_{new_safe} = [] block inserted")
+    print(f"  seed.py              ALL_INJURIES now includes INJURIES_{new_safe}")
+    print(f"  model/train.py       CURRENT_SEASON_YEAR → {new_year}")
+    print(f"  etl/fetch_minutes.py CURRENT_SEASON_YEAR → {new_year}")
 
     print(f"""
 Manual steps still needed
 ─────────────────────────
-1. SEASON_APPS "{old_s}" values — verify/correct the final counts for the
-   just-ended season (they may still be mid-season estimates).
+1. SEASON_APPS + SEASON_MINUTES "{old_s}" values — verify/correct the final
+   counts/minutes for the just-ended season (FBref fetch_minutes.py gets
+   minutes automatically, but final SEASON_APPS app counts need manual check).
 
 2. SQUAD career_apps — update total career appearances for all players
    (check Transfermarkt or Wikipedia for the end-of-season totals).

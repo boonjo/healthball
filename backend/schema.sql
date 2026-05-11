@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS players (
   debut_age         FLOAT,
   career_apps       INTEGER,
   recent_apps       INTEGER,
+  recent_minutes    INTEGER,
   scraped_at        TIMESTAMP DEFAULT NOW()
 );
 
@@ -38,5 +39,9 @@ CREATE TABLE IF NOT EXISTS risk_scores (
 );
 
 -- Indexes
-CREATE INDEX IF NOT EXISTS idx_injuries_player ON injuries(player_id);
-CREATE INDEX IF NOT EXISTS idx_risk_player     ON risk_scores(player_id);
+CREATE INDEX IF NOT EXISTS idx_injuries_player   ON injuries(player_id);
+CREATE INDEX IF NOT EXISTS idx_risk_player       ON risk_scores(player_id);
+CREATE INDEX IF NOT EXISTS idx_risk_player_time  ON risk_scores(player_id, computed_at DESC);
+
+-- Migration: add recent_minutes to existing installs (no-op on fresh schema)
+ALTER TABLE players ADD COLUMN IF NOT EXISTS recent_minutes INTEGER;

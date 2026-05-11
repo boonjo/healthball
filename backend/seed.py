@@ -101,6 +101,37 @@ SEASON_APPS = {
     EZE:          {"24/25": 33, "25/26": 33},
 }
 
+# ── Per-season minutes played ─────────────────────────────────────────────────
+# Estimated total minutes across all competitions (league + cups + European + internationals).
+# GK minutes ≈ apps × 90; outfield starters ≈ apps × 82–88; rotation ≈ apps × 65–75.
+# Update at end of each season with actual totals (source: Transfermarkt / FBref).
+# new_season.py adds the new season key (= 0) for all players automatically.
+SEASON_MINUTES = {
+    #               24/25   25/26
+    RAYA:         {"24/25": 3420, "25/26": 3420},   # GK: 38 × 90
+    KEPA:         {"24/25":  900, "25/26":  900},   # GK backup: 10 × 90
+    WHITE:        {"24/25": 1640, "25/26": 2296},   # starter: ×82
+    SALIBA:       {"24/25": 3080, "25/26": 3080},   # starter: 35 × 88
+    GABRIEL:      {"24/25": 3132, "25/26": 3219},   # starter: ×87
+    CALAFIORI:    {"24/25": 1350, "25/26": 2175},   # injury-hit: ×75
+    TIMBER:       {"24/25": 2800, "25/26": 1840},   # post-ACL: ×80
+    MOSQUERA:     {"24/25": 1820, "25/26": 1885},   # rotation: ×65
+    LEWIS_SKELLY: {"24/25":  375, "25/26": 2625},   # breakthrough: ×75
+    RICE:         {"24/25": 3872, "25/26": 3960},   # starter: ×88
+    ODEGAARD:     {"24/25": 2520, "25/26": 3360},   # ×84 (missed ankle spell)
+    MERINO:       {"24/25": 2886, "25/26": 2106},   # ×78 (shoulder + foot)
+    ZUBIMENDI:    {"24/25": 2952, "25/26": 3034},   # starter: ×82
+    NORGAARD:     {"24/25": 2160, "25/26": 2232},   # rotation: ×72
+    SAKA:         {"24/25": 3256, "25/26": 3520},   # starter: ×88
+    MARTINELLI:   {"24/25": 2975, "25/26": 2975},   # starter: ×85
+    HAVERTZ:      {"24/25": 3600, "25/26": 3680},   # high-volume: ×80
+    GYKERES:      {"24/25": 3854, "25/26": 3936},   # high-volume: ×82
+    JESUS:        {"24/25":  720, "25/26": 2160},   # injury-hit: ×72
+    TROSSARD:     {"24/25": 2584, "25/26": 2720},   # rotation: ×68
+    MADUEKE:      {"24/25": 2380, "25/26": 2380},   # rotation: ×70
+    EZE:          {"24/25": 2475, "25/26": 2475},   # rotation: ×75
+}
+
 # ── Squad ─────────────────────────────────────────────────────────────────────
 # Columns: name, position, age, nationality, tm_id, currently_injured, debut_age, career_apps
 # (recent_apps is computed from SEASON_APPS above — do not add it here)
@@ -141,7 +172,7 @@ SQUAD = [
     # 14 debut: Brøndby 2013 (age 18)
     ("Christian Nørgaard", "CM",  31, "Denmark",     148367, False, 18, 460),
     # 15 debut: Arsenal Nov 2018 (age 17)
-    ("Bukayo Saka",        "RW",  23, "England",     433177, False, 17, 330),
+    ("Bukayo Saka",        "IW",  23, "England",     433177, False, 17, 330),
     # 16 debut: Ituano Mar 2018 (age 16)
     ("Gabriel Martinelli", "LW",  24, "Brazil",      534272, False, 16, 230),
     # 17 debut: Leverkusen Oct 2016 (age 17)
@@ -151,7 +182,7 @@ SQUAD = [
     # 19 debut: Palmeiras Mar 2015 (age 17)
     ("Gabriel Jesus",      "CF",  28, "Brazil",      363205, False, 17, 400),
     # 20 debut: KRC Genk 2013 (age 18)
-    ("Leandro Trossard",   "LW",  31, "Belgium",     384156, False, 18, 380),
+    ("Leandro Trossard",   "WF",  31, "Belgium",     384156, False, 18, 380),
     # 21 debut: PSV 2021 (age 19)
     ("Noni Madueke",       "RW",  23, "England",     503987, False, 19, 140),
     # 22 debut: QPR 2017 (age 19)
@@ -253,16 +284,20 @@ with engine.begin() as conn:
             SEASON_APPS.get(pid_1based, {}).get(PREV_SEASON,   0) +
             SEASON_APPS.get(pid_1based, {}).get(SQUAD_SEASON,  0)
         )
+        recent_minutes = (
+            SEASON_MINUTES.get(pid_1based, {}).get(PREV_SEASON,   0) +
+            SEASON_MINUTES.get(pid_1based, {}).get(SQUAD_SEASON,  0)
+        )
         conn.execute(text("""
             INSERT INTO players
               (name, position, age, nationality, tm_id,
-               currently_injured, debut_age, career_apps, recent_apps)
+               currently_injured, debut_age, career_apps, recent_apps, recent_minutes)
             VALUES
               (:name, :position, :age, :nationality, :tm_id,
-               :ci, :debut_age, :career_apps, :recent_apps)
+               :ci, :debut_age, :career_apps, :recent_apps, :recent_minutes)
         """), dict(name=name, position=pos, age=age, nationality=nat, tm_id=tmid,
                    ci=ci, debut_age=debut_age, career_apps=career_apps,
-                   recent_apps=recent_apps))
+                   recent_apps=recent_apps, recent_minutes=recent_minutes))
 print(f"Inserted {len(SQUAD)} players.")
 
 with engine.begin() as conn:
